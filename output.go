@@ -3,10 +3,10 @@ package nsq
 import (
 	"errors"
 	"fmt"
+	"github.com/bitly/go-hostpool"
 	"github.com/bitly/go-nsq"
 	"github.com/mozilla-services/heka/pipeline"
 	"sync/atomic"
-	"time"
 )
 
 const (
@@ -28,6 +28,7 @@ type NsqOutput struct {
 	config    *nsq.Config
 	respChan  chan *nsq.ProducerTransaction
 	counter   uint64
+	hostPool  hostpool.HostPool
 }
 
 func (output *NsqOutput) ConfigStruct() interface{} {
@@ -68,6 +69,7 @@ func (output *NsqOutput) Init(config interface{}) (err error) {
 	}
 
 	output.respChan = make(chan *nsq.ProducerTransaction, len(output.Addresses))
+	output.hostPool = hostpool.New(output.Addresses)
 	for i := 0; i < len(output.Addresses); i++ {
 		go output.responder()
 	}
@@ -81,10 +83,7 @@ func (output *NsqOutput) Run(runner pipeline.OutputRunner,
 		return errors.New("Encoder required.")
 	}
 
-	var (
-		pack     *pipeline.PipelinePack
-		outgoing []byte
-	)
+	var pack *pipeline.PipelinePack
 
 	output.runner = runner
 	defer close(output.respChan)
@@ -97,24 +96,10 @@ func (output *NsqOutput) Run(runner pipeline.OutputRunner,
 			if !ok {
 				return
 			}
-			outgoing, err = runner.Encode(pack)
-			if err != nil {
-				runner.LogError(err)
-				continue
-			}
-			startTime := time.Now()
-			switch output.Mode {
-			case ModeRoundRobin:
-				counter := atomic.AddUint64(&output.counter, 1)
-				idx := counter % uint64(len(output.Addresses))
-				addr := output.Addresses[idx]
-				producer := output.producers[addr]
-				err = producer.PublishAsync(output.Topic, outgoing, output.respChan, pack, startTime, addr)
-			}
+			err = output.sendMessage(pack)
 			if err != nil {
 				runner.LogError(err)
 			}
-			pack.Recycle()
 		}
 	}
 
@@ -125,23 +110,72 @@ func (output *NsqOutput) Run(runner pipeline.OutputRunner,
 	return nil
 }
 
+// sendMessage asyncronously publishes encoded pipeline packs to nsq. It will
+// deliver messages to a corresponding nsq producer. If there is more than one
+// producer it uses RoundRobin or HostPool strategies according to the config
+// option.
+func (output *NsqOutput) sendMessage(pack *pipeline.PipelinePack) (err error) {
+	var body []byte
+	body, err = output.runner.Encode(pack)
+	if err != nil {
+		return
+	}
+
+	switch output.Mode {
+	case ModeRoundRobin:
+		counter := atomic.AddUint64(&output.counter, 1)
+		idx := counter % uint64(len(output.Addresses))
+		addr := output.Addresses[idx]
+		p := output.producers[addr]
+		err = p.PublishAsync(output.Topic, body, output.respChan, pack)
+	case ModeHostPool:
+		hostPoolResponse := output.hostPool.Get()
+		p := output.producers[hostPoolResponse.Host()]
+		err = p.PublishAsync(output.Topic, body, output.respChan, pack, hostPoolResponse)
+	}
+	return
+}
+
+// responder handles the eventual response from the asyncronous publish. If
+// there was an error when publishing, then we put the pipeline pack back onto
+// outputs inChan so that it can be republished. If there was no error, then the
+// pack gets recycled.
 func (output *NsqOutput) responder() {
 	var (
-		pack *pipeline.PipelinePack
-		// startTime time.Time
-		// address   string
+		pack             *pipeline.PipelinePack
+		hostPoolResponse hostpool.HostPoolResponse
+		inChan           chan *pipeline.PipelinePack
 	)
+
 	for t := range output.respChan {
 		switch output.Mode {
 		case ModeRoundRobin:
 			pack = t.Args[0].(*pipeline.PipelinePack)
-			// startTime = t.Args[1].(time.Time)
-			// address = t.Args[2].(string)
+		case ModeHostPool:
+			pack = t.Args[0].(*pipeline.PipelinePack)
+			hostPoolResponse = t.Args[1].(hostpool.HostPoolResponse)
 		}
 
-		if t.Error != nil {
+		success := t.Error == nil
+
+		if hostPoolResponse != nil {
+			if success {
+				hostPoolResponse.Mark(nil)
+			} else {
+				hostPoolResponse.Mark(errors.New("failed"))
+			}
+		}
+
+		// On success we recycle the pack, if it failed put it back into the
+		// recycle chan to be redelivered
+		if success {
+			pack.Recycle()
+		} else {
 			output.runner.LogError(fmt.Errorf("Publishing message failed: %s", t.Error.Error()))
-			output.runner.InChan() <- pack
+			if inChan == nil {
+				inChan = output.runner.InChan()
+			}
+			inChan <- pack
 		}
 	}
 }
