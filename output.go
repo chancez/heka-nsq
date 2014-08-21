@@ -7,6 +7,7 @@ import (
 	"github.com/bitly/go-nsq"
 	"github.com/mozilla-services/heka/pipeline"
 	"sync/atomic"
+	"time"
 )
 
 const (
@@ -29,6 +30,23 @@ type NsqOutput struct {
 	respChan  chan *nsq.ProducerTransaction
 	counter   uint64
 	hostPool  hostpool.HostPool
+	retryChan chan RetryMsg
+}
+
+type RetryMsg struct {
+	count     uint64
+	maxCount  uint64
+	body      []byte
+	retryChan chan RetryMsg
+}
+
+func (m RetryMsg) Retry() error {
+	if m.count > m.maxCount {
+		return errors.New("Exceeded max retry attempts")
+	}
+	m.retryChan <- m
+	m.count++
+	return nil
 }
 
 func (output *NsqOutput) ConfigStruct() interface{} {
@@ -39,7 +57,7 @@ func (output *NsqOutput) Init(config interface{}) (err error) {
 	conf := config.(*NsqOutputConfig)
 	output.NsqOutputConfig = conf
 	output.config = nsq.NewConfig()
-	output.producers = make(map[string]*nsq.Producer)
+	// output.config.BackoffMultiplier = time.Duration(time.Second * 6)
 
 	switch conf.Mode {
 	case "round-robin":
@@ -48,6 +66,7 @@ func (output *NsqOutput) Init(config interface{}) (err error) {
 		output.Mode = ModeHostPool
 	}
 
+	output.producers = make(map[string]*nsq.Producer)
 	var producer *nsq.Producer
 	for _, addr := range output.Addresses {
 		producer, err = nsq.NewProducer(addr, output.config)
@@ -69,6 +88,7 @@ func (output *NsqOutput) Init(config interface{}) (err error) {
 	}
 
 	output.respChan = make(chan *nsq.ProducerTransaction, len(output.Addresses))
+	output.retryChan = make(chan RetryMsg, 50)
 	output.hostPool = hostpool.New(output.Addresses)
 	for i := 0; i < len(output.Addresses); i++ {
 		go output.responder()
@@ -83,10 +103,14 @@ func (output *NsqOutput) Run(runner pipeline.OutputRunner,
 		return errors.New("Encoder required.")
 	}
 
-	var pack *pipeline.PipelinePack
+	var (
+		pack     *pipeline.PipelinePack
+		outgoing []byte
+	)
 
 	output.runner = runner
 	defer close(output.respChan)
+	defer close(output.retryChan)
 	inChan := runner.InChan()
 	ok := true
 
@@ -96,9 +120,29 @@ func (output *NsqOutput) Run(runner pipeline.OutputRunner,
 			if !ok {
 				return
 			}
-			err = output.sendMessage(pack)
+			outgoing, err = output.runner.Encode(pack)
+			if err != nil {
+				return
+			}
+
+			err = output.sendMessage(outgoing)
 			if err != nil {
 				runner.LogError(err)
+				msg := RetryMsg{body: outgoing, retryChan: output.retryChan, maxCount: 3}
+				err = msg.Retry()
+				if err != nil {
+					runner.LogError(fmt.Errorf("%s. No longer attempting to send message.", err.Error()))
+				}
+			}
+			pack.Recycle()
+		case msg := <-output.retryChan:
+			err = output.sendMessage(msg.body)
+			if err != nil {
+				runner.LogError(err)
+				err = msg.Retry()
+				if err != nil {
+					runner.LogError(fmt.Errorf("%s. No longer attempting to send message.", err.Error()))
+				}
 			}
 		}
 	}
@@ -114,24 +158,18 @@ func (output *NsqOutput) Run(runner pipeline.OutputRunner,
 // deliver messages to a corresponding nsq producer. If there is more than one
 // producer it uses RoundRobin or HostPool strategies according to the config
 // option.
-func (output *NsqOutput) sendMessage(pack *pipeline.PipelinePack) (err error) {
-	var body []byte
-	body, err = output.runner.Encode(pack)
-	if err != nil {
-		return
-	}
-
+func (output *NsqOutput) sendMessage(body []byte) (err error) {
 	switch output.Mode {
 	case ModeRoundRobin:
 		counter := atomic.AddUint64(&output.counter, 1)
 		idx := counter % uint64(len(output.Addresses))
 		addr := output.Addresses[idx]
 		p := output.producers[addr]
-		err = p.PublishAsync(output.Topic, body, output.respChan, pack)
+		err = p.PublishAsync(output.Topic, body, output.respChan, body)
 	case ModeHostPool:
 		hostPoolResponse := output.hostPool.Get()
 		p := output.producers[hostPoolResponse.Host()]
-		err = p.PublishAsync(output.Topic, body, output.respChan, pack, hostPoolResponse)
+		err = p.PublishAsync(output.Topic, body, output.respChan, body, hostPoolResponse)
 	}
 	return
 }
@@ -142,17 +180,16 @@ func (output *NsqOutput) sendMessage(pack *pipeline.PipelinePack) (err error) {
 // pack gets recycled.
 func (output *NsqOutput) responder() {
 	var (
-		pack             *pipeline.PipelinePack
+		body             []byte
 		hostPoolResponse hostpool.HostPoolResponse
-		inChan           chan *pipeline.PipelinePack
 	)
 
 	for t := range output.respChan {
 		switch output.Mode {
 		case ModeRoundRobin:
-			pack = t.Args[0].(*pipeline.PipelinePack)
+			body = t.Args[0].([]byte)
 		case ModeHostPool:
-			pack = t.Args[0].(*pipeline.PipelinePack)
+			body = t.Args[0].([]byte)
 			hostPoolResponse = t.Args[1].(hostpool.HostPoolResponse)
 		}
 
@@ -166,16 +203,13 @@ func (output *NsqOutput) responder() {
 			}
 		}
 
-		// On success we recycle the pack, if it failed put it back into the
-		// recycle chan to be redelivered
-		if success {
-			pack.Recycle()
-		} else {
+		if !success {
 			output.runner.LogError(fmt.Errorf("Publishing message failed: %s", t.Error.Error()))
-			if inChan == nil {
-				inChan = output.runner.InChan()
+			msg := RetryMsg{body: body, retryChan: output.retryChan, maxCount: 3}
+			err := msg.Retry()
+			if err != nil {
+				output.runner.LogError(fmt.Errorf("%s. No longer attempting to send message.", err.Error()))
 			}
-			inChan <- pack
 		}
 	}
 }
