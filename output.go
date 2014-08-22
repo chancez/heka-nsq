@@ -7,7 +7,6 @@ import (
 	"github.com/bitly/go-nsq"
 	"github.com/mozilla-services/heka/pipeline"
 	"sync/atomic"
-	"time"
 )
 
 const (
@@ -19,23 +18,22 @@ type NsqOutputConfig struct {
 	Addresses      []string `toml:"addresses"`
 	Topic          string   `toml:"topic"`
 	Mode           string   `toml:"mode"`
-	RetryDelay     uint64   `toml:"retry_delay"`
 	RetryQueueSize uint64   `toml:"retry_queue_size"`
-	MaxReconnects  uint64   `toml:"max_reconnects"`
 	MaxMsgRetries  uint64   `toml:"max_msg_retries"`
+	RetryOptions   *pipeline.RetryOptions
 }
 
 type NsqOutput struct {
 	*NsqOutputConfig
-	Mode       int
-	runner     pipeline.OutputRunner
-	producers  map[string]*nsq.Producer
-	config     *nsq.Config
-	respChan   chan *nsq.ProducerTransaction
-	counter    uint64
-	hostPool   hostpool.HostPool
-	retryChan  chan RetryMsg
-	retryCount uint64
+	Mode        int
+	runner      pipeline.OutputRunner
+	producers   map[string]*nsq.Producer
+	config      *nsq.Config
+	respChan    chan *nsq.ProducerTransaction
+	counter     uint64
+	hostPool    hostpool.HostPool
+	retryChan   chan RetryMsg
+	retryHelper *pipeline.RetryHelper
 }
 
 type RetryMsg struct {
@@ -56,9 +54,11 @@ func (m RetryMsg) Retry() error {
 
 func (output *NsqOutput) ConfigStruct() interface{} {
 	return &NsqOutputConfig{
-		RetryDelay:     3,
 		RetryQueueSize: 50,
-		MaxReconnects:  3,
+		RetryOptions: &pipeline.RetryOptions{
+			MaxRetries: 3,
+			Delay:      "1s",
+		},
 	}
 }
 
@@ -96,6 +96,11 @@ func (output *NsqOutput) Init(config interface{}) (err error) {
 		return err
 	}
 
+	output.retryHelper, err = pipeline.NewRetryHelper(*output.RetryOptions)
+	if err != nil {
+		return
+	}
+
 	output.respChan = make(chan *nsq.ProducerTransaction, len(output.Addresses))
 	output.retryChan = make(chan RetryMsg, output.RetryQueueSize)
 	output.hostPool = hostpool.New(output.Addresses)
@@ -115,7 +120,6 @@ func (output *NsqOutput) Run(runner pipeline.OutputRunner,
 	var (
 		pack     *pipeline.PipelinePack
 		outgoing []byte
-		delay    <-chan time.Time
 		msg      RetryMsg
 	)
 
@@ -126,10 +130,6 @@ func (output *NsqOutput) Run(runner pipeline.OutputRunner,
 	defer output.cleanup()
 
 	for ok {
-		if delay != nil {
-			<-delay
-			delay = nil
-		}
 		select {
 		case pack, ok = <-inChan:
 			if !ok {
@@ -141,7 +141,8 @@ func (output *NsqOutput) Run(runner pipeline.OutputRunner,
 			} else {
 				err = output.sendMessage(outgoing)
 				if err != nil {
-					delay, err = output.handleSendErr(err)
+					output.runner.LogError(err)
+					err = output.retryHelper.Wait()
 					if err != nil {
 						return
 					}
@@ -151,6 +152,8 @@ func (output *NsqOutput) Run(runner pipeline.OutputRunner,
 					if err != nil {
 						output.runner.LogError(err)
 					}
+				} else {
+					output.retryHelper.Reset()
 				}
 			}
 			pack.Recycle()
@@ -160,7 +163,8 @@ func (output *NsqOutput) Run(runner pipeline.OutputRunner,
 			}
 			err = output.sendMessage(msg.Body)
 			if err != nil {
-				delay, err = output.handleSendErr(err)
+				output.runner.LogError(err)
+				err = output.retryHelper.Wait()
 				if err != nil {
 					return
 				}
@@ -169,6 +173,8 @@ func (output *NsqOutput) Run(runner pipeline.OutputRunner,
 				if err != nil {
 					output.runner.LogError(err)
 				}
+			} else {
+				output.retryHelper.Reset()
 			}
 		}
 	}
@@ -201,21 +207,7 @@ func (output *NsqOutput) sendMessage(body []byte) (err error) {
 		p := output.producers[hostPoolResponse.Host()]
 		err = p.PublishAsync(output.Topic, body, output.respChan, body, hostPoolResponse)
 	}
-	if err != nil {
-		output.retryCount++
-	} else {
-		output.retryCount = 0
-	}
 	return
-}
-
-func (output *NsqOutput) handleSendErr(err error) (<-chan time.Time, error) {
-	output.runner.LogError(err)
-	if output.retryCount >= output.MaxReconnects {
-		return nil, errors.New("Exceeded max reconnect attempts")
-	}
-	// how long we wait before trying to publish again
-	return time.After(time.Second * time.Duration(output.RetryDelay)), nil
 }
 
 // responder handles the eventual response from the asyncronous publish. If
