@@ -6,7 +6,9 @@ import (
 	"github.com/bitly/go-hostpool"
 	"github.com/bitly/go-nsq"
 	"github.com/mozilla-services/heka/pipeline"
+	"github.com/mozilla-services/heka/plugins/tcp"
 	"sync/atomic"
+	"time"
 )
 
 const (
@@ -21,6 +23,52 @@ type NsqOutputConfig struct {
 	RetryQueueSize uint64   `toml:"retry_queue_size"`
 	MaxMsgRetries  uint64   `toml:"max_msg_retries"`
 	RetryOptions   *pipeline.RetryOptions
+
+	// Set to true if the TCP connection should be tunneled through TLS.
+	// Requires additional Tls config section.
+	UseTls bool `toml:"use_tls"`
+	// Subsection for TLS configuration.
+	Tls tcp.TlsConfig
+
+	// The following fields config options for nsq.Config
+
+	// Deadlines for network reads and writes
+	ReadTimeout  *int64 `toml:"read_timeout"`
+	WriteTimeout *int64 `toml:"write_timeout"`
+
+	// Identifiers sent to nsqd representing this client
+	// UserAgent is in the spirit of HTTP (default: "<client_library_name>/<version>")
+	ClientID  *string `toml:"client_id"` // (defaults: short hostname)
+	Hostname  *string `toml:"hostname"`
+	UserAgent *string `toml:"user_agent"`
+
+	// Duration of time between heartbeats. This must be less than ReadTimeout
+	HeartbeatInterval *int64 `toml:"heartbeat_interval"`
+	// Compression Settings
+	Deflate      *bool `toml:"deflate"`
+	DeflateLevel *int  `toml:"deflate_level"`
+	Snappy       *bool `toml:"snappy"`
+
+	// Size of the buffer (in bytes) used by nsqd for buffering writes to this connection
+	OutputBufferSize *int64 `toml:"output_buffer_size"`
+	// Timeout used by nsqd before flushing buffered writes (set to 0 to disable).
+	//
+	// WARNING: configuring clients with an extremely low
+	// (< 25ms) output_buffer_timeout has a significant effect
+	// on nsqd CPU usage (particularly with > 50 clients connected).
+	OutputBufferTimeout *int64 `toml:"output_buffer_timeout"`
+
+	// Maximum number of messages to allow in flight (concurrency knob)
+	MaxInFlight *int `toml:"max_in_flight"`
+
+	// Maximum amount of time to backoff when processing fails 0 == no backoff
+	MaxBackoffDuration *int64 `toml:"max_backoff_duration"`
+
+	// The server-side message timeout for messages delivered to this client
+	MsgTimeout *int64 `toml:"msg_timeout"`
+
+	// secret for nsqd authentication (requires nsqd 0.2.29+)
+	AuthSecret *string `toml:"auth_secret"`
 }
 
 type NsqOutput struct {
@@ -62,10 +110,74 @@ func (output *NsqOutput) ConfigStruct() interface{} {
 	}
 }
 
+func (output *NsqOutput) SetNsqConfig(conf *NsqOutputConfig) (err error) {
+	nsqConfig := nsq.NewConfig()
+	if conf.ReadTimeout != nil {
+		nsqConfig.ReadTimeout = time.Duration(*conf.ReadTimeout) * time.Millisecond
+	}
+	if conf.WriteTimeout != nil {
+		nsqConfig.WriteTimeout = time.Duration(*conf.WriteTimeout) * time.Millisecond
+	}
+	if conf.ClientID != nil {
+		nsqConfig.ClientID = *conf.ClientID
+	}
+	if conf.Hostname != nil {
+		nsqConfig.Hostname = *conf.Hostname
+	}
+	if conf.UserAgent != nil {
+		nsqConfig.UserAgent = *conf.UserAgent
+	}
+	if conf.HeartbeatInterval != nil {
+		nsqConfig.HeartbeatInterval = time.Duration(*conf.HeartbeatInterval) * time.Millisecond
+	}
+	if conf.Deflate != nil {
+		nsqConfig.Deflate = *conf.Deflate
+	}
+	if conf.DeflateLevel != nil {
+		nsqConfig.DeflateLevel = *conf.DeflateLevel
+	}
+	if conf.Snappy != nil {
+		nsqConfig.Snappy = *conf.Snappy
+	}
+	if conf.OutputBufferSize != nil {
+		nsqConfig.OutputBufferSize = *conf.OutputBufferSize
+	}
+	if conf.OutputBufferTimeout != nil {
+		nsqConfig.OutputBufferTimeout = time.Duration(*conf.OutputBufferTimeout) * time.Millisecond
+	}
+	if conf.MaxInFlight != nil {
+		nsqConfig.MaxInFlight = *conf.MaxInFlight
+	}
+	if conf.MaxBackoffDuration != nil {
+		nsqConfig.MaxBackoffDuration = time.Duration(*conf.MaxBackoffDuration) * time.Millisecond
+	}
+	if conf.MsgTimeout != nil {
+		nsqConfig.MsgTimeout = time.Duration(*conf.MsgTimeout) * time.Millisecond
+	}
+	if conf.AuthSecret != nil {
+		nsqConfig.AuthSecret = *conf.AuthSecret
+	}
+
+	// Tls
+	if conf.UseTls {
+		tls, err := tcp.CreateGoTlsConfig(&conf.Tls)
+		if err != nil {
+			return err
+		}
+		output.config.TlsConfig = tls
+	}
+	output.config = nsqConfig
+
+	return
+}
+
 func (output *NsqOutput) Init(config interface{}) (err error) {
 	conf := config.(*NsqOutputConfig)
 	output.NsqOutputConfig = conf
-	output.config = nsq.NewConfig()
+	err = output.SetNsqConfig(conf)
+	if err != nil {
+		return
+	}
 
 	switch conf.Mode {
 	case "round-robin":
