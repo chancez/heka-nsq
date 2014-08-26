@@ -98,6 +98,47 @@ for messages delivered to this client.
 (requires nsqd 0.2.29+).
 
 
+NsqOutput
+---------
+
+Connects to a list of `nsqd` servers and publishes messages on the configured
+topic.
+
+Config:
+
+* nsqd_tcp_addresses (list of strings): A list of nsqd tcp addresses which the
+consumer will connect to directly.
+* topic (string): The topic to subscribe to.
+* use_tls (bool): Specifies whether or not SSL/TLS encryption should be used
+for the TCP connections. Defaults to false.
+* tls (TlsConfig): A sub-section that specifies the settings to be used for any
+SSL/TLS encryption. This will only have any impact if use_tls is set to true.
+See [Configuring TLS][tls].
+* read_timeout (int, optional): Deadline for network reads in milliseconds.
+Defaults to 60 seconds.
+* write_timeout (int, optional): Deadline for network writes in milliseconds.
+Defaults to 1 second.
+* client_id (string, optional): Client id sent to nsqd representing this client.
+Defaults to short hostname.
+* hostname (string, optional): Hostname sent to nsqd representing this client.
+* user_agent (string, optional): User agent sent to nsqd representing this client.
+defaults to "<client_library_name>/<version>".
+* heartbeat_interval (int, optional): Duration of time in milliseconds between
+heartbeats. This must be less than `read_timeout`. Defaults to 30 seconds.
+* deflate (bool, optional): Use deflate compression algorithm.
+* deflate_level (int, optional): Sets deflate level. Defaults to 6.
+* snappy (bool, optional): Use snappy compression/decompression.
+* output_buffer_size (int, optional): Size of the buffer (in bytes) used by nsqd
+for buffering writes to this connection. Defaults to 16384.
+* output_buffer_timeout (int, optional): Timeout in milliseconds used by nsqd
+before flushing buffered writes (set to 0 to disable). Defaults to 250 milliseconds.
+* max_in_flight (int, optional): Maximum number of messages to allow in flight.
+Defaults to 1.
+* max_backoff_duration (int, optional): Maximum amount of time in milliseconds
+to backoff when processing fails 0 == no backoff. Defaults to 2 minutes.
+* msg_timeout (int, optional): The server-side message timeout in milliseconds
+for messages delivered to this client.
+* auth_secret (string, optional): Secret for nsqd authentication
 
 [tls]: http://hekad.readthedocs.org/en/latest/tls.html#tls "configuring tls"
 
