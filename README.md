@@ -106,7 +106,7 @@ topic.
 
 Config:
 
-* nsqd_tcp_addresses (list of strings): A list of nsqd tcp addresses which the
+* addresses (list of strings): A list of nsqd tcp addresses which the
 consumer will connect to directly.
 * topic (string): The topic to subscribe to.
 * use_tls (bool): Specifies whether or not SSL/TLS encryption should be used
