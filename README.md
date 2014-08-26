@@ -108,7 +108,20 @@ Config:
 
 * addresses (list of strings): A list of nsqd tcp addresses which the
 consumer will connect to directly.
-* topic (string): The topic to subscribe to.
+* topic (string): The topic to publish to.
+* mode (string, optional): Specifies delivery strategy between multiple nsqd
+nodes. Can be either `round-robin` or `hostpool`. The `round-robin` strategy
+round-robins publishing messages to each server in the list of addresses. The
+`hostpool` strategy measures which servers provide the best response times, and
+produces the least errors and uses this to determine which server is optimal.
+Defaults to "round-robin".
+* retry_queue_size (int, optional): The size of the queue containing messages
+which failed to publish but are going to be retried. Defaults to 50.
+* max_msg_retries (int, optional): The maximum number of times to attempt
+publishing an individual message before no longer trying to publish.
+* retries (RetryOptions, optional): A sub-section that specifies the settings
+to be used for restart behavior. See [configuring restarting]
+(http://hekad.readthedocs.org/en/latest/config/index.html#configuring-restarting-behavior).
 * use_tls (bool): Specifies whether or not SSL/TLS encryption should be used
 for the TCP connections. Defaults to false.
 * tls (TlsConfig): A sub-section that specifies the settings to be used for any
