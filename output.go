@@ -75,13 +75,14 @@ type NsqOutput struct {
 	*NsqOutputConfig
 	Mode        int
 	runner      pipeline.OutputRunner
-	producers   map[string]*nsq.Producer
+	producers   map[string]Producer
 	config      *nsq.Config
 	respChan    chan *nsq.ProducerTransaction
 	counter     uint64
 	hostPool    hostpool.HostPool
 	retryChan   chan RetryMsg
 	retryHelper *pipeline.RetryHelper
+	newProducer func(string, *nsq.Config) (Producer, error)
 }
 
 type RetryMsg struct {
@@ -186,10 +187,14 @@ func (output *NsqOutput) Init(config interface{}) (err error) {
 		output.Mode = ModeHostPool
 	}
 
-	output.producers = make(map[string]*nsq.Producer)
-	var producer *nsq.Producer
+	if output.newProducer == nil {
+		output.newProducer = NewProducer
+	}
+
+	output.producers = make(map[string]Producer)
+	var producer Producer
 	for _, addr := range output.Addresses {
-		producer, err = nsq.NewProducer(addr, output.config)
+		producer, err = output.newProducer(addr, output.config)
 		if err != nil {
 			break
 		}

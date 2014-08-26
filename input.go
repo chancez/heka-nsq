@@ -88,7 +88,7 @@ type NsqInputConfig struct {
 
 type NsqInput struct {
 	*NsqInputConfig
-	consumer    *nsq.Consumer
+	consumer    Consumer
 	config      *nsq.Config
 	decoderChan chan *pipeline.PipelinePack
 	runner      pipeline.InputRunner
@@ -198,7 +198,7 @@ func (input *NsqInput) Init(config interface{}) (err error) {
 	if err != nil {
 		return
 	}
-	input.consumer, err = nsq.NewConsumer(input.Topic, input.Channel, input.config)
+	input.consumer, err = NewConsumer(input.Topic, input.Channel, input.config)
 	input.consumer.SetLogger(nil, nsq.LogLevelError)
 
 	return nil
@@ -256,7 +256,7 @@ func (input *NsqInput) Run(runner pipeline.InputRunner,
 		return err
 	}
 
-	<-input.consumer.StopChan
+	<-input.consumer.StoppedChan()
 
 	return nil
 }
