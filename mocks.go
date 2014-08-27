@@ -38,7 +38,7 @@ func NewMockConsumer(topic, channel string, config *nsq.Config) (*MockConsumer, 
 	return consumer, nil
 }
 
-func (p *MockProducer) SetLogger(l nsq.Logger, lvl nsq.LogLevel) {
+func (p *MockProducer) SetLogger(l Logger, lvl nsq.LogLevel) {
 }
 
 func (c *MockConsumer) AddHandler(handler nsq.Handler) {
@@ -63,5 +63,5 @@ func (c *MockConsumer) Stop() {
 	close(c.stopChan)
 }
 
-func (c *MockConsumer) SetLogger(l nsq.Logger, lvl nsq.LogLevel) {
+func (c *MockConsumer) SetLogger(l Logger, lvl nsq.LogLevel) {
 }

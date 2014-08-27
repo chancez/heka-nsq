@@ -7,11 +7,19 @@ import (
 type Producer interface {
 	PublishAsync(topic string, body []byte, doneChan chan *nsq.ProducerTransaction, args ...interface{}) error
 	Stop()
-	SetLogger(l nsq.Logger, lvl nsq.LogLevel)
+	SetLogger(l Logger, lvl nsq.LogLevel)
+}
+
+type NsqProducer struct {
+	*nsq.Producer
+}
+
+type Logger interface {
+	Output(calldepth int, s string) error
 }
 
 type Consumer interface {
-	SetLogger(l nsq.Logger, lvl nsq.LogLevel)
+	SetLogger(l Logger, lvl nsq.LogLevel)
 	AddHandler(handler nsq.Handler)
 	ConnectToNSQDs(addresses []string) error
 	ConnectToNSQLookupds(addresses []string) error
@@ -26,7 +34,15 @@ type NsqConsumer struct {
 }
 
 func NewProducer(addr string, config *nsq.Config) (Producer, error) {
-	return nsq.NewProducer(addr, config)
+	producer, err := nsq.NewProducer(addr, config)
+	if err != nil {
+		return nil, err
+	}
+	return &NsqProducer{Producer: producer}, nil
+}
+
+func (p *NsqProducer) SetLogger(l Logger, lvl nsq.LogLevel) {
+	p.Producer.SetLogger(l, lvl)
 }
 
 func NewConsumer(topic string, channel string, config *nsq.Config) (Consumer, error) {
@@ -39,4 +55,8 @@ func NewConsumer(topic string, channel string, config *nsq.Config) (Consumer, er
 
 func (c *NsqConsumer) StoppedChan() chan int {
 	return c.StopChan
+}
+
+func (c *NsqConsumer) SetLogger(l Logger, lvl nsq.LogLevel) {
+	c.Consumer.SetLogger(l, lvl)
 }
