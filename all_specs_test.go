@@ -10,6 +10,7 @@ func TestAllSpecs(t *testing.T) {
 	r.Parallel = false
 
 	r.AddSpec(NsqOutputSpec)
+	r.AddSpec(NsqInputSpec)
 
 	gospec.MainGoTest(r, t)
 }
