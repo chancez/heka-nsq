@@ -175,6 +175,11 @@ func (output *NsqOutput) SetNsqConfig(conf *NsqOutputConfig) (err error) {
 func (output *NsqOutput) Init(config interface{}) (err error) {
 	conf := config.(*NsqOutputConfig)
 	output.NsqOutputConfig = conf
+
+	if len(conf.Addresses) < 1 {
+		return errors.New("Need at least one nsqd address.")
+	}
+
 	err = output.SetNsqConfig(conf)
 	if err != nil {
 		return
@@ -327,10 +332,8 @@ func (output *NsqOutput) sendMessage(body []byte) (err error) {
 	return
 }
 
-// responder handles the eventual response from the asyncronous publish. If
-// there was an error when publishing, then we put the pipeline pack back onto
-// outputs inChan so that it can be republished. If there was no error, then the
-// pack gets recycled.
+// responder handles the eventual response from the asyncronous publish.
+// It handles retrying to send the message if there was an error
 func (output *NsqOutput) responder() {
 	var (
 		body             []byte
