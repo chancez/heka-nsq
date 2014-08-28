@@ -81,7 +81,6 @@ func NsqInputSpec(c gs.Context) {
 					decoder.Init(&plugins.ScribbleDecoderConfig{})
 
 					mockDecoderRunner := pipelinemock.NewMockDecoderRunner(ctrl)
-					mockDecoderRunner.EXPECT().Decoder().Return(decoder)
 					mockDecoderRunner.EXPECT().InChan().Return(retPackChan)
 					ith.MockHelper.EXPECT().DecoderRunner(decoderName,
 						fmt.Sprintf("%s-%s", inputName, decoderName),
