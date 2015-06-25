@@ -19,6 +19,7 @@ const (
 type NsqOutputConfig struct {
 	Addresses      []string `toml:"addresses"`
 	Topic          string   `toml:"topic"`
+	TopicVariable  string   `toml:"topic_variable"`
 	Mode           string   `toml:"mode"`
 	RetryQueueSize uint64   `toml:"retry_queue_size"`
 	MaxMsgRetries  uint64   `toml:"max_msg_retries"`
@@ -83,6 +84,7 @@ type NsqOutput struct {
 	retryChan   chan RetryMsg
 	retryHelper *pipeline.RetryHelper
 	newProducer func(string, *nsq.Config) (Producer, error)
+	topicField  *messageVariable
 }
 
 type RetryMsg struct {
@@ -90,6 +92,7 @@ type RetryMsg struct {
 	maxCount  uint64
 	Body      []byte
 	retryChan chan RetryMsg
+	topic     string
 }
 
 func (m RetryMsg) Retry() error {
@@ -180,6 +183,18 @@ func (output *NsqOutput) Init(config interface{}) (err error) {
 		return errors.New("Need at least one nsqd address.")
 	}
 
+	if conf.TopicVariable != "" {
+		if conf.Topic != "" {
+			return errors.New("Only one of Topic or TopicVariable allowed.")
+		}
+		if output.topicField = verifyMessageVariable(conf.TopicVariable); output.topicField == nil {
+			return fmt.Errorf("invalid topic_variable: %s", conf.TopicVariable)
+		}
+
+	} else if conf.Topic == "" && conf.TopicVariable == "" {
+		return errors.New("One of Topic or TopicVariable required.")
+	}
+
 	err = output.SetNsqConfig(conf)
 	if err != nil {
 		return
@@ -243,6 +258,7 @@ func (output *NsqOutput) Run(runner pipeline.OutputRunner,
 		pack     *pipeline.PipelinePack
 		outgoing []byte
 		msg      RetryMsg
+		topic    string = output.Topic
 	)
 
 	output.runner = runner
@@ -261,7 +277,13 @@ func (output *NsqOutput) Run(runner pipeline.OutputRunner,
 			if err != nil {
 				runner.LogError(err)
 			} else {
-				err = output.sendMessage(outgoing)
+				if output.topicField != nil {
+					topic = getMessageVariable(pack.Message, output.topicField)
+					if topic == "" {
+						// should we skip the message
+					}
+				}
+				err = output.sendMessage(topic, outgoing)
 				if err != nil {
 					output.runner.LogError(err)
 					err = output.retryHelper.Wait()
@@ -269,7 +291,7 @@ func (output *NsqOutput) Run(runner pipeline.OutputRunner,
 						return
 					}
 					// Create a retry msg, and requeue it
-					msg := RetryMsg{Body: outgoing, retryChan: output.retryChan, maxCount: output.MaxMsgRetries}
+					msg := RetryMsg{Body: outgoing, topic: topic, retryChan: output.retryChan, maxCount: output.MaxMsgRetries}
 					err = msg.Retry()
 					if err != nil {
 						output.runner.LogError(err)
@@ -283,7 +305,7 @@ func (output *NsqOutput) Run(runner pipeline.OutputRunner,
 			if !ok {
 				return nil
 			}
-			err = output.sendMessage(msg.Body)
+			err = output.sendMessage(msg.topic, msg.Body)
 			if err != nil {
 				output.runner.LogError(err)
 				err = output.retryHelper.Wait()
@@ -316,18 +338,18 @@ func (output *NsqOutput) cleanup() {
 // deliver messages to a corresponding nsq producer. If there is more than one
 // producer it uses RoundRobin or HostPool strategies according to the config
 // option.
-func (output *NsqOutput) sendMessage(body []byte) (err error) {
+func (output *NsqOutput) sendMessage(topic string, body []byte) (err error) {
 	switch output.Mode {
 	case ModeRoundRobin:
 		counter := atomic.AddUint64(&output.counter, 1)
 		idx := counter % uint64(len(output.Addresses))
 		addr := output.Addresses[idx]
 		p := output.producers[addr]
-		err = p.PublishAsync(output.Topic, body, output.respChan, body)
+		err = p.PublishAsync(topic, body, output.respChan, body, topic)
 	case ModeHostPool:
 		hostPoolResponse := output.hostPool.Get()
 		p := output.producers[hostPoolResponse.Host()]
-		err = p.PublishAsync(output.Topic, body, output.respChan, body, hostPoolResponse)
+		err = p.PublishAsync(topic, body, output.respChan, body, hostPoolResponse, topic)
 	}
 	return
 }
@@ -337,6 +359,7 @@ func (output *NsqOutput) sendMessage(body []byte) (err error) {
 func (output *NsqOutput) responder() {
 	var (
 		body             []byte
+		topic            string
 		hostPoolResponse hostpool.HostPoolResponse
 	)
 
@@ -344,9 +367,11 @@ func (output *NsqOutput) responder() {
 		switch output.Mode {
 		case ModeRoundRobin:
 			body = t.Args[0].([]byte)
+			topic = t.Args[1].(string)
 		case ModeHostPool:
 			body = t.Args[0].([]byte)
 			hostPoolResponse = t.Args[1].(hostpool.HostPoolResponse)
+			topic = t.Args[2].(string)
 		}
 
 		success := t.Error == nil
@@ -361,7 +386,7 @@ func (output *NsqOutput) responder() {
 
 		if !success {
 			output.runner.LogError(fmt.Errorf("Publishing message failed: %s", t.Error.Error()))
-			msg := RetryMsg{Body: body, retryChan: output.retryChan, maxCount: output.MaxMsgRetries}
+			msg := RetryMsg{Body: body, topic: topic, retryChan: output.retryChan, maxCount: output.MaxMsgRetries}
 			err := msg.Retry()
 			if err != nil {
 				output.runner.LogError(fmt.Errorf("%s. No longer attempting to send message.", err.Error()))
